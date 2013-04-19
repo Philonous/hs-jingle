@@ -1,0 +1,9 @@
+<jingle xmlns='urn:xmpp:jingle:1'
+        action='session-accept'
+        responder='juliet@capulet.lit/balcony'
+        sid='a73sjjvkla37jfea'>
+  <content creator='initiator' name='this-is-a-stub'>
+    <description xmlns='urn:xmpp:jingle:apps:stub:0'/>
+    <transport xmlns='urn:xmpp:jingle:transports:stub:0'/>
+  </content>
+</jingle>

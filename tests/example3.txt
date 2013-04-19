@@ -1,0 +1,7 @@
+<jingle xmlns='urn:xmpp:jingle:1'
+        action='session-terminate'
+        sid='a73sjjvkla37jfea'>
+  <reason>
+    <success/>
+  </reason>
+</jingle>
