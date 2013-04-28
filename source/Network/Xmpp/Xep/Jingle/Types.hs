@@ -73,6 +73,7 @@ data Jingle = Jingle { action :: !Action
                      , reason :: !(Maybe JingleReason)
                      } deriving Show
 
+
 data Creator = CInitiator | CResponder
 
 instance Show Creator where
@@ -97,6 +98,7 @@ instance Read Senders where
     readsPrec _ "initiator" = [(SInitiator , "")]
     readsPrec _ "responder" = [(SResponder , "")]
     readsPrec _ "both"      = [(SBoth      , "")]
+    readsPrec _ _           = []
 
 data JingleContent = JingleContent { creator :: !Creator
                                    , disposition :: !(Maybe Text)
@@ -154,15 +156,19 @@ data ReasonType = Busy
 type MessageChan = TChan (Xmpp.IQRequestTicket, Jingle)
 
 data JingleHandler = JingleHandler
-    { jingleSessions :: TVar (Map Text Session)
-    , jingleThread :: ThreadId
+    { jingleSessions :: !(TVar (Map Text Session))
+    , jingleThread :: !ThreadId
+    , jingleXmppSession :: !Xmpp.Session
     }
 
 
 data Session = Session { sState  :: TVar State
                        , sSid    :: !Text
                        , sRemote :: !Xmpp.Jid
-                       , sRequests :: (Xmpp.IQRequestTicket -> Jingle -> IO ())
+                       , sRequests :: (Session
+                                       -> Xmpp.IQRequestTicket
+                                       -> Jingle
+                                       -> IO ())
                        }
 
 data TransportType = Datagram | Stream | Both deriving (Eq, Show)

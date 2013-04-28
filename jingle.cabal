@@ -30,3 +30,4 @@ library
                        , transformers
                        , mtl
                        , hslogger
+  GHC-Options: -Wall

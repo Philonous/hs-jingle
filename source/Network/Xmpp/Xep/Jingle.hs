@@ -9,13 +9,8 @@ import           Control.Arrow (first)
 import           Control.Concurrent
 import           Control.Concurrent.STM
 import           Control.Monad
-import           Control.Monad.Trans
-import           Control.Monad.Trans.Maybe
 import           Data.List
 import qualified Data.Map as Map
-import           Data.Text (Text)
-import qualified Data.Text as Text
-import           Data.XML.Pickle
 import           Data.XML.Types
 import           System.Log.Logger (errorM, infoM, debugM)
 
@@ -35,8 +30,7 @@ serviceUnavailable = Xmpp.StanzaError Xmpp.Cancel Xmpp.ServiceUnavailable Nothin
 
 badRequest :: Xmpp.StanzaError
 badRequest = Xmpp.StanzaError Xmpp.Cancel Xmpp.BadRequest Nothing
-                                      Nothing
-
+                              Nothing
 dummyContentHandler :: ApplicationHandler
 dummyContentHandler = ApplicationHandler { chTransportType = Datagram
                                          , chNamespace = "dummycontent"
@@ -46,11 +40,10 @@ dummyContentHandler = ApplicationHandler { chTransportType = Datagram
 
 errorUnavailable :: Xmpp.IQRequestTicket -> Xmpp.Session -> IO ()
 errorUnavailable ticket session = void $ Xmpp.answerIQ ticket
-                                     (Left serviceUnavailable) session
+                                     (Left serviceUnavailable)
 
-errorBadRequest :: Xmpp.IQRequestTicket -> Xmpp.Session -> IO ()
-errorBadRequest ticket session = void $ Xmpp.answerIQ ticket
-                                     (Left badRequest) session
+errorBadRequest :: Xmpp.IQRequestTicket -> IO ()
+errorBadRequest ticket = void $ Xmpp.answerIQ ticket (Left badRequest)
 
 jingleTerminate reasonType sid =
     Jingle { action = SessionTerminate
@@ -62,10 +55,19 @@ jingleTerminate reasonType sid =
                                         , reasonText = Nothing
                                         , reasonElement = Nothing
                                         }
+           , jinglePayload = []
            }
 
-startJingle :: (Xmpp.Jid -> Jingle -> TVar State -> TChan a
-                 -> IO (Maybe (Xmpp.IQRequestTicket -> Jingle -> IO ())))
+
+type MessageHandler = Session -> Xmpp.IQRequestTicket -> Jingle -> IO ()
+
+type HandlerFunc = Xmpp.Jid
+                   -> Jingle
+                   -> TVar State
+                   -> TChan Jingle
+                   -> IO (Maybe MessageHandler)
+
+startJingle :: HandlerFunc
             -> (Xmpp.IQRequest -> IO Bool)
             -> Xmpp.Session
             -> IO (Maybe JingleHandler)
@@ -87,6 +89,7 @@ startJingle handleContent policy xmppSession = do
             return . Just $ JingleHandler
                                { jingleSessions = sessions
                                , jingleThread = thread
+                               , jingleXmppSession = xmppSession
                                }
 
   where
@@ -112,9 +115,9 @@ startJingle handleContent policy xmppSession = do
                                    do
                                        Xmpp.answerIQ ticket
                                                      (Right Nothing)
-                                                     xmppSession
+
                                        return ()
-                                 else sRequests session ticket ji
+                                 else sRequests session session ticket ji
                             else errorUnavailable ticket xmppSession
     checkPolicy ticket f = do
         answer <- policy (Xmpp.iqRequestBody ticket)
@@ -122,19 +125,18 @@ startJingle handleContent policy xmppSession = do
     newSession ji ticket stateRef requestsRef =
         case ( Xmpp.iqRequestFrom $ Xmpp.iqRequestBody ticket) of
             (Just remote) -> do
-                Xmpp.answerIQ ticket (Right Nothing) xmppSession
+                Xmpp.answerIQ ticket (Right Nothing)
                 handle <- handleContent remote ji stateRef requestsRef
                 case handle of
                     Just handlerFunc -> do
-                        void $ Xmpp.answerIQ ticket (Right Nothing) xmppSession
+                        void $ Xmpp.answerIQ ticket (Right Nothing)
                         return . Just $ Session { sState = stateRef
                                 , sSid = sid ji
                                 , sRemote = remote
                                 , sRequests = handlerFunc
                                 }
                     Nothing -> return Nothing
-            _ -> errorBadRequest ticket xmppSession >> return Nothing
-    elementNS = nameNamespace . elementName
+            _ -> errorBadRequest ticket >> return Nothing
     isSessionPing Jingle{ action = SessionInfo
                         , initiator = Nothing
                         , responder = Nothing
@@ -146,8 +148,37 @@ startJingle handleContent policy xmppSession = do
 addSession :: Session -> JingleHandler -> IO Bool
 addSession s JingleHandler{jingleSessions = href} = atomically $ do
     hs <- readTVar href
-    if Map.member (sSid s) hs
-        then return False
-        else do
-        writeTVar href $ Map.insert (sSid s) s hs
-        return True
+    case Map.member (sSid s) hs of
+        True -> return False
+        False -> do
+            writeTVar href $ Map.insert (sSid s) s hs
+            return True
+
+-- | Remove session without sending session-terminate (e.g. when we received session-terminate)
+endSession s jh = atomically $ modifyTVar (jingleSessions jh) (Map.delete s)
+
+-- | Send session-terminate and end session
+terminateSession sid JingleHandler{ jingleSessions = href
+                                  , jingleXmppSession = xmppSession
+                                  }
+           reason = do
+    s <- atomically $ do
+        sessions <- readTVar href
+        let (s, sessions') = Map.updateLookupWithKey (\_ _ -> Nothing) sid sessions
+        writeTVar href sessions'
+        return s
+    case s of
+        Nothing -> return ()
+        Just s' -> do
+            let terminate = Jingle { action = SessionTerminate
+                                   , initiator = Nothing
+                                   , responder = Nothing
+                                   , sid = sSid s'
+                                   , content = []
+                                   , jinglePayload = []
+                                   , reason = Just reason
+                                   }
+                terminateE = pickleElem xpJingle terminate
+            _ <- Xmpp.sendIQ Nothing (Just $ sRemote s')
+                        Xmpp.Set Nothing terminateE xmppSession
+            return ()
