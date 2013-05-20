@@ -30,7 +30,7 @@ xpJingleContent = xpWrap
          $. xpAttr "name" xpText
          $. xpAttrImplied "senders" xpPrim
       )
-      (xp3Tuple xpTransport xpDescription xpSecurity)
+      (xp3Tuple xpDescription xpTransport xpSecurity)
 
 
 -- xpJingleReason = xpOption $ xpElemNodes (jName "reason") $
