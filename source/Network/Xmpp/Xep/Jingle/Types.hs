@@ -161,14 +161,19 @@ data JingleHandler = JingleHandler
     , jingleXmppSession :: !Xmpp.Session
     }
 
+type MessageHandler = Session -> Xmpp.IQRequestTicket -> Jingle -> IO ()
+
+type HandlerFunc = Xmpp.Jid
+                   -> Jingle
+                   -> TVar State
+                   -> TChan Jingle
+                   -> JingleHandler
+                   -> IO (Maybe MessageHandler)
 
 data Session = Session { sState  :: TVar State
                        , sSid    :: !Text
                        , sRemote :: !Xmpp.Jid
-                       , sRequests :: (Session
-                                       -> Xmpp.IQRequestTicket
-                                       -> Jingle
-                                       -> IO ())
+                       , sRequests :: MessageHandler
                        }
 
 data TransportType = Datagram | Stream | Both deriving (Eq, Show)

@@ -11,12 +11,14 @@ import           Control.Concurrent.STM
 import           Control.Monad
 import           Data.List
 import qualified Data.Map as Map
+import qualified Data.Text as Text
 import           Data.XML.Types
-import           System.Log.Logger (errorM, infoM, debugM)
-
+import           Data.XML.Pickle (ppUnpickleError)
 import qualified Network.Xmpp as Xmpp
 import           Network.Xmpp.Xep.Jingle.Picklers
 import           Network.Xmpp.Xep.Jingle.Types
+import           System.Log.Logger
+import           System.Log.Logger (errorM, infoM, debugM)
 
 
 equivClasses :: (a -> a -> Bool) -> [a] -> [[a]]
@@ -58,34 +60,37 @@ jingleTerminate reasonType sid =
            , jinglePayload = []
            }
 
-
-type MessageHandler = Session -> Xmpp.IQRequestTicket -> Jingle -> IO ()
-
-type HandlerFunc = Xmpp.Jid
-                   -> Jingle
-                   -> TVar State
-                   -> TChan Jingle
-                   -> IO (Maybe MessageHandler)
-
 startJingle :: HandlerFunc
             -> (Xmpp.IQRequest -> IO Bool)
             -> Xmpp.Session
             -> IO (Maybe JingleHandler)
 startJingle handleContent policy xmppSession = do
     sessions <- newTVarIO Map.empty
+    infoM "Pontarius.Xmpp.Jingle" "getting IQ channel"
     chan' <- Xmpp.listenIQChan Xmpp.Set "urn:xmpp:jingle:1" xmppSession
     case chan' of
-        Left _ -> errorM "Jingle" "Jingle channel is already in use"
+        Left _ -> errorM "Pontarius.Xmpp.Jingle"
+                         "Jingle channel is already in use"
                   >> return Nothing
         Right chan -> do
+            infoM "Pontarius.Xmpp.Jingle" "Got channel, starting worker thread"
             thread <- forkIO . forever $ do
                 ticket <- atomically $ readTChan chan
+                tid <- myThreadId
                 let request = Xmpp.iqRequestBody ticket
+                    jh = JingleHandler
+                               { jingleSessions = sessions
+                               , jingleThread = tid
+                               , jingleXmppSession = xmppSession
+                               }
                 case unpickleElem xpJingle $ Xmpp.iqRequestPayload request of
-                    Left _ -> return ()
+                    Left e -> do
+                        errorM "Pontarius.Xmpp.Jingle" $
+                                "Could not unpickle jingle element:\n"
+                                  ++ ppUnpickleError e
                     Right ji -> case action ji of
-                        SessionInitiate -> sessionInitiate sessions ji ticket
-                        _               -> handleSession sessions ji ticket
+                        SessionInitiate -> sessionInitiate sessions ji ticket jh
+                        _               -> handleSession sessions ji ticket jh
             return . Just $ JingleHandler
                                { jingleSessions = sessions
                                , jingleThread = thread
@@ -93,49 +98,54 @@ startJingle handleContent policy xmppSession = do
                                }
 
   where
-    sessionInitiate sessions ji ticket = do
+    sessionInitiate sessions ji ticket jh = do
+        debugM "Pontarius.Xmpp.Jingle" $ "Recevied session-initiate: " ++
+               Text.unpack (sid ji)
         sess <- atomically $ readTVar sessions
         case Map.lookup (sid ji) sess of
             Nothing -> do
                 stateRef <- newTVarIO PENDING
                 requestsRef <- newTChanIO
-                mbs <- newSession ji ticket stateRef requestsRef
+                mbs <- newSession jh ji ticket stateRef requestsRef
                 case mbs of
                     Nothing -> return ()
                     Just s -> do
                         atomically . modifyTVar sessions $ Map.insert (sSid s) s
             Just _ -> return () -- TODO
-    handleSession sessions ji ticket = do
+    handleSession sessions ji ticket jh = do
         sess <- atomically $ readTVar sessions
         case Map.lookup (sid ji) sess of
-            Nothing -> checkPolicy ticket $ do return () -- TODO?
-            Just session -> if (Xmpp.iqRequestFrom $ Xmpp.iqRequestBody ticket)
-                               == (Just $ sRemote session)
-                            then if isSessionPing ji then
-                                   do
-                                       Xmpp.answerIQ ticket
-                                                     (Right Nothing)
-
-                                       return ()
-                                 else sRequests session session ticket ji
-                            else errorUnavailable ticket xmppSession
+            Nothing -> do
+                errorM "Pontarius.Xmpp.Jingle" $ "Session not found: " ++
+                       show ( sid ji)
+                checkPolicy ticket $ do return () -- TODO?
+            Just session -> do
+                debugM "Pontarius.Xmpp.Jingle"
+                          $ "Got message for session " ++ Text.unpack (sid ji)
+                if (Xmpp.iqRequestFrom $ Xmpp.iqRequestBody ticket)
+                              == (Just $ sRemote session)
+                    then if isSessionPing ji then do
+                           Xmpp.answerIQ ticket (Right Nothing)
+                           return ()
+                         else sRequests session session ticket ji
+                    else errorUnavailable ticket xmppSession
     checkPolicy ticket f = do
         answer <- policy (Xmpp.iqRequestBody ticket)
         if answer then f else errorUnavailable ticket xmppSession
-    newSession ji ticket stateRef requestsRef =
+    newSession jh ji ticket stateRef requestsRef =
         case ( Xmpp.iqRequestFrom $ Xmpp.iqRequestBody ticket) of
             (Just remote) -> do
                 Xmpp.answerIQ ticket (Right Nothing)
-                handle <- handleContent remote ji stateRef requestsRef
+                handle <- handleContent remote ji stateRef requestsRef jh
                 case handle of
                     Just handlerFunc -> do
-                        void $ Xmpp.answerIQ ticket (Right Nothing)
                         return . Just $ Session { sState = stateRef
                                 , sSid = sid ji
                                 , sRemote = remote
                                 , sRequests = handlerFunc
                                 }
-                    Nothing -> return Nothing
+                    Nothing -> return Nothing -- The handler has to decline the
+                                              -- session
             _ -> errorBadRequest ticket >> return Nothing
     isSessionPing Jingle{ action = SessionInfo
                         , initiator = Nothing
